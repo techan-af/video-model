@@ -11,10 +11,18 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['ALLOWED_EXTENSIONS'] = set(['mp4', 'avi', 'mov'])
 app.secret_key = 'your-secret-key'
 
+@app.route('/')
+def home():
+    return "Hello, Render!"
+
 # Setup device and load the trained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_path = 'best_model.pth'
 
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))  # Get the port from Render, default to 5000
+    app.run(host="0.0.0.0", port=port)
+    
 # Initialize model architecture (ResNet50) and load weights
 model = models.resnet50(pretrained=False)
 num_ftrs = model.fc.in_features
