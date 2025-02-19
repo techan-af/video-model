@@ -4,25 +4,23 @@ import torch
 import torchvision.transforms as transforms
 import torchvision.models as models
 from PIL import Image
-from flask import Flask, request, render_template, redirect, url_for, flash
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+import uvicorn
 
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['ALLOWED_EXTENSIONS'] = set(['mp4', 'avi', 'mov'])
-app.secret_key = 'your-secret-key'
+app = FastAPI()
 
-@app.route('/')
-def home():
-    return "Hello, Render!"
+# Set up template directory
+templates = Jinja2Templates(directory="templates")
+
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov'}
 
 # Setup device and load the trained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_path = 'best_model.pth'
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Get the port from Render, default to 5000
-    app.run(host="0.0.0.0", port=port)
-    
 # Initialize model architecture (ResNet50) and load weights
 model = models.resnet50(pretrained=False)
 num_ftrs = model.fc.in_features
@@ -39,26 +37,18 @@ transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-def allowed_file(filename):
-    """Check if the uploaded file has an allowed video extension."""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+def allowed_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def predict_frame(pil_image):
-    """Predict the label for a single PIL image (frame)."""
+def predict_frame(pil_image: Image.Image) -> str:
     image = pil_image.convert("RGB")
     image = transform(image).unsqueeze(0).to(device)
     with torch.no_grad():
         outputs = model(image)
         _, pred = torch.max(outputs, 1)
-    # Assuming class index 1 corresponds to "Indian Police"
     return "Indian Police" if pred.item() == 1 else "Not Indian Police"
 
-def process_video(video_path, frame_interval=30):
-    """
-    Process the video file frame-by-frame.
-    Samples one frame every `frame_interval` frames.
-    Returns a result message along with frame statistics.
-    """
+def process_video(video_path: str, frame_interval: int = 30):
     cap = cv2.VideoCapture(video_path)
     frame_count = 0
     police_count = 0
@@ -69,7 +59,6 @@ def process_video(video_path, frame_interval=30):
         if not ret:
             break
         if frame_count % frame_interval == 0:
-            # Convert frame (BGR from OpenCV) to RGB for PIL
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
             label = predict_frame(pil_image)
@@ -79,33 +68,35 @@ def process_video(video_path, frame_interval=30):
         frame_count += 1
     
     cap.release()
-    
-    # If any frame shows an Indian Police, flag as scam.
-    result = "Could be a scam" if police_count > 0 else "Not a scam"
+    result = "Could be a scam" if police_count > (total_frames_processed / 2) else "Not a scam"
     return result, police_count, total_frames_processed
 
-@app.route('/', methods=['GET', 'POST'])
-def upload_file():
-    if request.method == 'POST':
-        # Check if the post request has the file part
-        if 'file' not in request.files:
-            flash('No file part')
-            return redirect(request.url)
-        file = request.files['file']
-        if file.filename == '':
-            flash('No selected file')
-            return redirect(request.url)
-        if file and allowed_file(file.filename):
-            filename = file.filename  # For production, consider using secure_filename
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            file.save(filepath)
-            result, police_count, total_frames = process_video(filepath)
-            return render_template('result.html', result=result, police_count=police_count, total_frames=total_frames)
-        else:
-            flash('File type not allowed')
-            return redirect(request.url)
-    return render_template('upload.html')
+@app.get("/", response_class=HTMLResponse)
+async def get_upload(request: Request):
+    return templates.TemplateResponse("upload.html", {"request": request})
 
-if __name__ == '__main__':
-    app.run(debug=True)
+@app.post("/upload/", response_class=HTMLResponse)
+async def upload_file(request: Request, file: UploadFile = File(...)):
+    if not allowed_file(file.filename):
+        return templates.TemplateResponse("upload.html", {"request": request, "error": "File type not allowed"})
+    
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+    
+    result, police_count, total_frames = process_video(file_path)
+    
+    # Optionally remove the file after processing
+    os.remove(file_path)
+    
+    return templates.TemplateResponse("result.html", {
+        "request": request,
+        "result": result,
+        "police_count": police_count,
+        "total_frames_processed": total_frames
+    })
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
